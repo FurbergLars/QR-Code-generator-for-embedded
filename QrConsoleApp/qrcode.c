@@ -316,9 +316,11 @@ static void reserve_and_maybe_write_format(qr_code_t *qr, bool write, uint16_t b
         set_function(x1, y1);
         if (write) set_module_bit(qr, x1, y1, bit);
 
+        /* Second copy (ISO/IEC 18004): bits 0..7 run leftwards along row 8
+         * from the right edge, bits 8..14 run downwards along column 8. */
         int x2, y2;
-        if (i < 7) { y2 = QR_SIZE - 1 - i; x2 = 8; }
-        else       { y2 = 8; x2 = QR_SIZE - 15 + i; }
+        if (i < 8) { x2 = QR_SIZE - 1 - i; y2 = 8; }
+        else       { x2 = 8; y2 = QR_SIZE - 15 + i; }
         set_function(x2, y2);
         if (write) set_module_bit(qr, x2, y2, bit);
     }
