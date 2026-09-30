@@ -355,6 +355,13 @@ static uint16_t compute_format_bits(uint8_t data5) {
     return (uint16_t)(bits ^ 0x5412u);
 }
 
+/* The 5 format data bits for a given mask number: 2-bit ECC indicator
+ * (L=01, M=00, Q=11, H=10) followed by the 3-bit mask number. */
+static uint8_t format_data(uint8_t mask) {
+    static const uint8_t ECC_INDICATOR[4] = {1, 0, 3, 2};
+    return (uint8_t)((ECC_INDICATOR[QR_ECC_LEVEL] << 3) | mask);
+}
+
 #if QR_VERSION >= 7
 /* 18-bit version string: 6-bit version number, BCH(18,6)-encoded with
  * generator 0x1F25 (no extra XOR mask for version info). */
@@ -456,6 +463,8 @@ static void place_data(qr_code_t *qr, qr_bitsource_t *bs) {
 /* Masking. Trial masks are scored without materializing a second grid: */
 /* the masked value of a data module is computed on the fly from the    */
 /* unmasked grid + the mask formula, so only one grid ever exists.      */
+/* Function modules (including the real format/version bits, written    */
+/* into the grid before each trial) are read back as-is, never masked.  */
 /* ==================================================================== */
 static bool mask_condition(uint8_t mask, int x, int y) {
     switch (mask) {
@@ -477,6 +486,11 @@ static inline bool masked_value(const qr_code_t *qr, uint8_t mask, int x, int y)
 }
 
 #ifndef QR_FIXED_MASK
+/* Scores one candidate mask on the FINISHED symbol, as the spec and the
+ * common reference encoders do. The caller must therefore already have
+ * written this mask's real format-info bits and the version-info bits into
+ * the grid (see qr_generate). They are function modules, so masked_value()
+ * reads them back unmasked. */
 static uint32_t evaluate_penalty(const qr_code_t *qr, uint8_t mask) {
     uint32_t penalty = 0;
 
@@ -546,7 +560,9 @@ static uint32_t evaluate_penalty(const qr_code_t *qr, uint8_t mask) {
         }
     }
 
-    /* Rule 4: overall dark/light balance. */
+    /* Rule 4: overall dark/light balance. Penalty = 10 * k, where k is the
+     * smallest integer >= 0 with (45 - 5k)% <= dark/total <= (55 + 5k)%.
+     * Exact integer form: k = ceil(|dark/total - 1/2| / 5%) - 1. */
     uint32_t dark = 0;
     for (int y = 0; y < QR_SIZE; y++) {
         for (int x = 0; x < QR_SIZE; x++) {
@@ -554,12 +570,10 @@ static uint32_t evaluate_penalty(const qr_code_t *qr, uint8_t mask) {
         }
     }
     uint32_t total = (uint32_t)QR_SIZE * (uint32_t)QR_SIZE;
-    uint32_t percent = dark * 100u / total;
-    uint32_t prev5 = (percent / 5u) * 5u;
-    uint32_t next5 = prev5 + 5u;
-    uint32_t a = prev5 > 50u ? prev5 - 50u : 50u - prev5;
-    uint32_t b = next5 > 50u ? next5 - 50u : 50u - next5;
-    penalty += (a < b ? a : b) / 5u * 10u;
+    uint32_t d20 = dark * 20u, t10 = total * 10u;
+    uint32_t dev = d20 > t10 ? d20 - t10 : t10 - d20; /* = 20 * total * |dark/total - 1/2| */
+    /* total is odd, so dev >= 10 and the quotient below is always >= 1. */
+    penalty += ((dev + total - 1u) / total - 1u) * 10u;
 
     return penalty;
 }
@@ -654,9 +668,17 @@ bool qr_generate(qr_code_t *qr, const uint8_t *data, uint16_t len) {
 #ifdef QR_FIXED_MASK
     uint8_t best = QR_FIXED_MASK;
 #else
+    /* Candidates are scored as the finished symbol, i.e. including their
+     * real format and version bits. Version info does not depend on the
+     * mask, so write it once; format info does, so write it per candidate.
+     * Both are written again for the winner below. */
+#if QR_VERSION >= 7
+    reserve_and_maybe_write_version(qr, true, compute_version_bits(QR_VERSION));
+#endif
     uint8_t best = 0;
     uint32_t bestScore = 0xFFFFFFFFu;
     for (uint8_t m = 0; m < 8; m++) {
+        reserve_and_maybe_write_format(qr, true, compute_format_bits(format_data(m)));
         uint32_t score = evaluate_penalty(qr, m);
         if (score < bestScore) { bestScore = score; best = m; }
     }
@@ -664,8 +686,7 @@ bool qr_generate(qr_code_t *qr, const uint8_t *data, uint16_t len) {
     apply_mask_final(qr, best);
 
     /* --- Format & version info (written last: never masked) --- */
-    static const uint8_t ECC_INDICATOR[4] = {1, 0, 3, 2}; /* L=01 M=00 Q=11 H=10 */
-    uint16_t fbits = compute_format_bits((uint8_t)((ECC_INDICATOR[QR_ECC_LEVEL] << 3) | best));
+    uint16_t fbits = compute_format_bits(format_data(best));
     reserve_and_maybe_write_format(qr, true, fbits);
 #if QR_VERSION >= 7
     uint32_t vbits = compute_version_bits(QR_VERSION);
